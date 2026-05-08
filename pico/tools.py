@@ -4,11 +4,13 @@
 如何做参数校验，以及最终如何执行，都是在这里定义的。
 """
 
+import json
 import shutil
 import subprocess
 import textwrap
 from functools import partial
 
+from . import github_tools
 from .workspace import IGNORED_PATH_NAMES, clip
 
 BASE_TOOL_SPECS = {
@@ -42,6 +44,26 @@ BASE_TOOL_SPECS = {
         "risky": True,
         "description": "Replace one exact text block in a file.",
     },
+    "github_get_file": {
+        "schema": {"repo": "str", "path": "str", "ref": "str=''"},
+        "risky": False,
+        "description": "Download a UTF-8 file from a GitHub repository. Requires GITHUB_TOKEN, GITHUB_PAT, or GH_PAT.",
+    },
+    "github_create_branch": {
+        "schema": {"repo": "str", "branch": "str", "from_branch": "str='main'"},
+        "risky": True,
+        "description": "Create a GitHub branch from another branch. Requires GITHUB_TOKEN, GITHUB_PAT, or GH_PAT.",
+    },
+    "github_update_file": {
+        "schema": {"repo": "str", "path": "str", "content": "str", "branch": "str", "message": "str", "sha": "str=''"},
+        "risky": True,
+        "description": "Create or update a UTF-8 file on a GitHub branch with one commit.",
+    },
+    "github_create_pr": {
+        "schema": {"repo": "str", "title": "str", "head": "str", "base": "str='main'", "body": "str=''"},
+        "risky": True,
+        "description": "Create a GitHub pull request from head into base.",
+    },
 }
 
 DELEGATE_TOOL_SPEC = {
@@ -58,6 +80,10 @@ TOOL_EXAMPLES = {
     "write_file": '<tool name="write_file" path="binary_search.py"><content>def binary_search(nums, target):\n    return -1\n</content></tool>',
     "patch_file": '<tool name="patch_file" path="binary_search.py"><old_text>return -1</old_text><new_text>return mid</new_text></tool>',
     "delegate": '<tool>{"name":"delegate","args":{"task":"inspect README.md","max_steps":3}}</tool>',
+    "github_get_file": '<tool>{"name":"github_get_file","args":{"repo":"owner/repo","path":"README.md","ref":"main"}}</tool>',
+    "github_create_branch": '<tool>{"name":"github_create_branch","args":{"repo":"owner/repo","branch":"pico/update-readme","from_branch":"main"}}</tool>',
+    "github_update_file": '<tool name="github_update_file" repo="owner/repo" path="README.md" branch="pico/update-readme" message="Update README"><content>new README text</content></tool>',
+    "github_create_pr": '<tool>{"name":"github_create_pr","args":{"repo":"owner/repo","title":"Update README","head":"pico/update-readme","base":"main","body":"Created by pico."}}</tool>',
 }
 
 
@@ -137,6 +163,38 @@ def validate_tool(agent, name, args):
         count = text.count(old_text)
         if count != 1:
             raise ValueError(f"old_text must occur exactly once, found {count}")
+        return
+
+    if name == "github_get_file":
+        _validate_github_repo_and_path(args)
+        return
+
+    if name == "github_create_branch":
+        _validate_github_repo(args)
+        if not str(args.get("branch", "")).strip():
+            raise ValueError("branch must not be empty")
+        if not str(args.get("from_branch", "main")).strip():
+            raise ValueError("from_branch must not be empty")
+        return
+
+    if name == "github_update_file":
+        _validate_github_repo_and_path(args)
+        if "content" not in args:
+            raise ValueError("missing content")
+        if not str(args.get("branch", "")).strip():
+            raise ValueError("branch must not be empty")
+        if not str(args.get("message", "")).strip():
+            raise ValueError("message must not be empty")
+        return
+
+    if name == "github_create_pr":
+        _validate_github_repo(args)
+        if not str(args.get("title", "")).strip():
+            raise ValueError("title must not be empty")
+        if not str(args.get("head", "")).strip():
+            raise ValueError("head must not be empty")
+        if not str(args.get("base", "main")).strip():
+            raise ValueError("base must not be empty")
         return
 
     if name == "delegate":
@@ -258,6 +316,77 @@ def tool_patch_file(agent, args):
     return f"patched {path.relative_to(agent.root)}"
 
 
+def _validate_github_repo(args):
+    github_tools.parse_repo(args.get("repo", ""))
+
+
+def _validate_github_repo_and_path(args):
+    _validate_github_repo(args)
+    path = str(args.get("path", "")).strip().lstrip("/")
+    if not path:
+        raise ValueError("path must not be empty")
+    if path.startswith("../") or "/../" in path:
+        raise ValueError("path must not contain '..' segments")
+
+
+def _compact_json(payload):
+    return json.dumps(payload, ensure_ascii=False, sort_keys=True)
+
+
+def tool_github_get_file(agent, args):
+    del agent
+    result = github_tools.get_file(
+        repo=args["repo"],
+        path=args["path"],
+        ref=args.get("ref", ""),
+    )
+    return textwrap.dedent(
+        f"""\
+        repo: {result['repo']}
+        path: {result['path']}
+        ref: {result.get('ref', '') or '-'}
+        sha: {result['sha']}
+        content:
+        {clip(result['content'])}
+        """
+    ).strip()
+
+
+def tool_github_create_branch(agent, args):
+    del agent
+    result = github_tools.create_branch(
+        repo=args["repo"],
+        branch=args["branch"],
+        from_branch=args.get("from_branch", "main"),
+    )
+    return "github_branch_created: " + _compact_json(result)
+
+
+def tool_github_update_file(agent, args):
+    del agent
+    result = github_tools.update_file(
+        repo=args["repo"],
+        path=args["path"],
+        content=args["content"],
+        branch=args["branch"],
+        message=args["message"],
+        sha=args.get("sha", ""),
+    )
+    return "github_file_updated: " + _compact_json(result)
+
+
+def tool_github_create_pr(agent, args):
+    del agent
+    result = github_tools.create_pr(
+        repo=args["repo"],
+        title=args["title"],
+        head=args["head"],
+        base=args.get("base", "main"),
+        body=args.get("body", ""),
+    )
+    return "github_pr_created: " + _compact_json(result)
+
+
 def tool_delegate(agent, args):
     if agent.depth >= agent.max_depth:
         raise ValueError("delegate depth exceeded")
@@ -295,4 +424,8 @@ _TOOL_RUNNERS = {
     "run_shell": tool_run_shell,
     "write_file": tool_write_file,
     "patch_file": tool_patch_file,
+    "github_get_file": tool_github_get_file,
+    "github_create_branch": tool_github_create_branch,
+    "github_update_file": tool_github_update_file,
+    "github_create_pr": tool_github_create_pr,
 }
