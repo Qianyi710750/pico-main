@@ -11,6 +11,7 @@ import textwrap
 from functools import partial
 
 from . import github_tools
+from .mcp_client import GitHubMCPClient
 from .workspace import IGNORED_PATH_NAMES, clip
 
 BASE_TOOL_SPECS = {
@@ -329,62 +330,46 @@ def _validate_github_repo_and_path(args):
         raise ValueError("path must not contain '..' segments")
 
 
-def _compact_json(payload):
-    return json.dumps(payload, ensure_ascii=False, sort_keys=True)
-
-
 def tool_github_get_file(agent, args):
-    del agent
-    result = github_tools.get_file(
-        repo=args["repo"],
-        path=args["path"],
-        ref=args.get("ref", ""),
-    )
+    result = _github_mcp_call(agent, "github_get_file", args)
+    try:
+        payload = json.loads(result)
+    except json.JSONDecodeError:
+        return result
     return textwrap.dedent(
         f"""\
-        repo: {result['repo']}
-        path: {result['path']}
-        ref: {result.get('ref', '') or '-'}
-        sha: {result['sha']}
+        repo: {payload.get('repo', args['repo'])}
+        path: {payload.get('path', args['path'])}
+        ref: {payload.get('ref', '') or '-'}
+        sha: {payload.get('sha', '')}
         content:
-        {clip(result['content'])}
+        {clip(payload.get('content', ''))}
         """
     ).strip()
 
 
 def tool_github_create_branch(agent, args):
-    del agent
-    result = github_tools.create_branch(
-        repo=args["repo"],
-        branch=args["branch"],
-        from_branch=args.get("from_branch", "main"),
-    )
-    return "github_branch_created: " + _compact_json(result)
+    return "github_branch_created: " + _github_mcp_call(agent, "github_create_branch", args)
 
 
 def tool_github_update_file(agent, args):
-    del agent
-    result = github_tools.update_file(
-        repo=args["repo"],
-        path=args["path"],
-        content=args["content"],
-        branch=args["branch"],
-        message=args["message"],
-        sha=args.get("sha", ""),
-    )
-    return "github_file_updated: " + _compact_json(result)
+    return "github_file_updated: " + _github_mcp_call(agent, "github_update_file", args)
 
 
 def tool_github_create_pr(agent, args):
-    del agent
-    result = github_tools.create_pr(
-        repo=args["repo"],
-        title=args["title"],
-        head=args["head"],
-        base=args.get("base", "main"),
-        body=args.get("body", ""),
-    )
-    return "github_pr_created: " + _compact_json(result)
+    return "github_pr_created: " + _github_mcp_call(agent, "github_create_pr", args)
+
+
+def _github_mcp_client(agent):
+    client = getattr(agent, "_github_mcp_client", None)
+    if client is None:
+        client = GitHubMCPClient()
+        setattr(agent, "_github_mcp_client", client)
+    return client
+
+
+def _github_mcp_call(agent, tool_name, args):
+    return _github_mcp_client(agent).call_tool(tool_name, args)
 
 
 def tool_delegate(agent, args):

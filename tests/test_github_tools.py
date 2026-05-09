@@ -3,6 +3,8 @@ import json
 from unittest.mock import patch
 
 from pico import FakeModelClient, MiniAgent, SessionStore, WorkspaceContext
+from pico.github_mcp_server import handle
+from pico.mcp_client import GitHubMCPClient
 from pico import github_tools
 
 
@@ -37,6 +39,63 @@ def test_github_tools_are_registered_with_expected_risk(tmp_path):
     assert agent.tools["github_create_branch"]["risky"] is True
     assert agent.tools["github_update_file"]["risky"] is True
     assert agent.tools["github_create_pr"]["risky"] is True
+
+
+def test_github_mcp_server_lists_github_tools():
+    result = handle({"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}})
+    names = [tool["name"] for tool in result["tools"]]
+
+    assert names == [
+        "github_get_file",
+        "github_create_branch",
+        "github_update_file",
+        "github_create_pr",
+    ]
+
+
+def test_github_mcp_client_lists_tools_over_stdio():
+    client = GitHubMCPClient()
+    try:
+        names = [tool["name"] for tool in client.list_tools()]
+    finally:
+        client.close()
+
+    assert "github_get_file" in names
+    assert "github_create_pr" in names
+
+
+def test_pico_github_tool_runner_calls_mcp(tmp_path):
+    agent = build_agent(tmp_path)
+
+    with patch("pico.tools._github_mcp_call") as fake_call:
+        fake_call.return_value = json.dumps(
+            {
+                "repo": "octo/demo",
+                "path": "README.md",
+                "ref": "main",
+                "sha": "readme-sha",
+                "content": "hello through mcp\n",
+            }
+        )
+        result = agent.run_tool(
+            "github_get_file",
+            {
+                "repo": "octo/demo",
+                "path": "README.md",
+                "ref": "main",
+            },
+        )
+
+    fake_call.assert_called_once_with(
+        agent,
+        "github_get_file",
+        {
+            "repo": "octo/demo",
+            "path": "README.md",
+            "ref": "main",
+        },
+    )
+    assert "hello through mcp" in result
 
 
 def test_github_get_file_downloads_and_decodes_content():
