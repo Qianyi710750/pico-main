@@ -264,6 +264,58 @@ def test_quick_ask_can_keep_independent_sidecar_history(tmp_path):
     assert "What is JSON-RPC?" in agent.model_client.prompts[-1]
 
 
+def test_prune_turn_removes_turn_from_future_context_without_deleting_history(tmp_path):
+    agent = build_agent(
+        tmp_path,
+        [
+            "<final>Noisy answer.</final>",
+            "<final>Useful answer.</final>",
+            "<final>Checked.</final>",
+        ],
+    )
+
+    assert agent.ask("Noisy side topic") == "Noisy answer."
+    assert agent.ask("Useful main topic") == "Useful answer."
+    history_before = list(agent.session["history"])
+
+    result = agent.prune_turn(1)
+
+    assert "excluded turn 1" in result
+    assert len(agent.session["history"]) == len(history_before)
+    assert agent.session["history"][0]["context_state"] == "excluded"
+    assert agent.session["history"][1]["context_state"] == "excluded"
+    assert "Noisy side topic" not in agent.history_text()
+    assert "Useful main topic" in agent.history_text()
+
+    assert agent.ask("Continue main topic") == "Checked."
+    prompt = agent.model_client.prompts[-1]
+    assert "Noisy side topic" not in prompt
+    assert "Noisy answer." not in prompt
+    assert "Useful main topic" in prompt
+
+
+def test_restore_turn_puts_pruned_turn_back_into_context(tmp_path):
+    agent = build_agent(
+        tmp_path,
+        [
+            "<final>First answer.</final>",
+            "<final>Second answer.</final>",
+        ],
+    )
+
+    assert agent.ask("First topic") == "First answer."
+    agent.prune_turn(1)
+    assert "First topic" not in agent.history_text()
+
+    result = agent.restore_turn(1)
+
+    assert "restored turn 1" in result
+    assert "First topic" in agent.history_text()
+    assert "excluded_at" not in agent.session["history"][0]
+    assert agent.ask("Second topic") == "Second answer."
+    assert "First topic" in agent.model_client.prompts[-1]
+
+
 def test_delegate_uses_child_agent(tmp_path):
     agent = build_agent(
         tmp_path,

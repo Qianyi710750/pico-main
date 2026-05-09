@@ -412,8 +412,82 @@ class Pico:
     def memory_text(self):
         return self.memory.render_memory_text()
 
+    @staticmethod
+    def history_item_active(item):
+        return str(item.get("context_state", "active")).strip() != "excluded"
+
+    def context_history(self):
+        return [item for item in self.session["history"] if self.history_item_active(item)]
+
+    def history_turns(self, include_excluded=False):
+        turns = []
+        current = None
+        turn_number = 0
+        for index, item in enumerate(self.session["history"]):
+            if item.get("role") == "user":
+                if current is not None and (include_excluded or not current["excluded"]):
+                    turns.append(current)
+                turn_number += 1
+                current = {
+                    "number": turn_number,
+                    "start": index,
+                    "end": index,
+                    "excluded": not self.history_item_active(item),
+                    "user": str(item.get("content", "")),
+                    "items": [item],
+                }
+                continue
+            if current is None:
+                continue
+            current["end"] = index
+            current["items"].append(item)
+            current["excluded"] = current["excluded"] or not self.history_item_active(item)
+        if current is not None and (include_excluded or not current["excluded"]):
+            turns.append(current)
+        return turns
+
+    def history_summary(self, include_excluded=False, limit=20):
+        turns = self.history_turns(include_excluded=include_excluded)
+        if not turns:
+            return "(no turns)"
+        lines = []
+        for turn in turns[-int(limit):]:
+            marker = "excluded" if turn["excluded"] else "active"
+            tool_count = sum(1 for item in turn["items"] if item.get("role") == "tool")
+            suffix = f", {tool_count} tool" + ("" if tool_count == 1 else "s") if tool_count else ""
+            lines.append(f"{turn['number']}. [{marker}{suffix}] {clip(turn['user'], 120)}")
+        return "\n".join(lines)
+
+    def _set_turn_context_state(self, turn_number, state):
+        turns = self.history_turns(include_excluded=True)
+        turn_number = int(turn_number)
+        if turn_number < 1 or turn_number > len(turns):
+            raise ValueError(f"turn must be between 1 and {len(turns)}")
+        if state not in {"active", "excluded"}:
+            raise ValueError("state must be active or excluded")
+        turn = turns[turn_number - 1]
+        timestamp = now()
+        for index in range(turn["start"], turn["end"] + 1):
+            item = self.session["history"][index]
+            item["context_state"] = state
+            if state == "excluded":
+                item["excluded_at"] = timestamp
+                item["excluded_reason"] = "user_pruned"
+            else:
+                item.pop("excluded_at", None)
+                item.pop("excluded_reason", None)
+        self.session_path = self.session_store.save(self.session)
+        action = "excluded" if state == "excluded" else "restored"
+        return f"{action} turn {turn_number}: {clip(turn['user'], 120)}"
+
+    def prune_turn(self, turn_number):
+        return self._set_turn_context_state(turn_number, "excluded")
+
+    def restore_turn(self, turn_number):
+        return self._set_turn_context_state(turn_number, "active")
+
     def history_text(self):
-        history = self.session["history"]
+        history = self.context_history()
         if not history:
             return "- empty"
 

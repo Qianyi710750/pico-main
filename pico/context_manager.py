@@ -189,7 +189,7 @@ class ContextManager:
         else:
             relevant_lines.append("- none")
         relevant_raw = "\n".join(relevant_lines)
-        history = list(getattr(self.agent, "session", {}).get("history", []))
+        history = self._context_history()
         history_raw = self._raw_history_text(history)
         return {
             "prefix": SectionRender(raw=section_texts["prefix"], budget=len(section_texts["prefix"]), rendered=section_texts["prefix"], details={}),
@@ -295,7 +295,7 @@ class ContextManager:
         return max(1, usable // note_count)
 
     def _render_history_section(self, budget):
-        history = list(getattr(self.agent, "session", {}).get("history", []))
+        history = self._context_history()
         raw = self._raw_history_text(history)
         if not history:
             rendered = "Transcript:\n- empty"
@@ -433,6 +433,11 @@ class ContextManager:
             else:
                 lines.append(f"[{item['role']}] {item['content']}")
         return "\n".join(["Transcript:", *lines])
+
+    def _context_history(self):
+        if hasattr(self.agent, "context_history"):
+            return list(self.agent.context_history())
+        return list(getattr(self.agent, "session", {}).get("history", []))
 
     def _render_history_item(self, item, line_limit):
         if item["role"] == "tool":

@@ -39,8 +39,12 @@ HELP_DETAILS = textwrap.dedent(
     """\
     Commands:
     /help    Show this help message.
+    /history Show recent main conversation turns.
     /memory  Show the agent's distilled working memory.
+    /prune N Remove a main conversation turn from future context.
+    /pruned  Show turns removed from future context.
     /quick   Ask a short side question without adding it to the main session history.
+    /restore N Restore a pruned main conversation turn.
     /session Show the path to the saved session file.
     /reset   Clear the current session history and memory.
     /exit    Exit the agent.
@@ -315,8 +319,24 @@ def main(argv=None):
         if user_input == "/help":
             print(HELP_DETAILS)
             continue
+        if user_input == "/history":
+            print(agent.history_summary())
+            continue
         if user_input == "/memory":
             print(agent.memory_text())
+            continue
+        if user_input.startswith("/prune"):
+            raw_turn = user_input[len("/prune"):].strip()
+            if not raw_turn:
+                print("usage: /prune <turn-number>")
+                continue
+            try:
+                print(agent.prune_turn(int(raw_turn)))
+            except (RuntimeError, ValueError) as exc:
+                print(str(exc), file=sys.stderr)
+            continue
+        if user_input == "/pruned":
+            print(agent.history_summary(include_excluded=True))
             continue
         if user_input.startswith("/quick"):
             question = user_input[len("/quick"):].strip()
@@ -327,6 +347,16 @@ def main(argv=None):
             try:
                 print(agent.quick_ask(question))
             except RuntimeError as exc:
+                print(str(exc), file=sys.stderr)
+            continue
+        if user_input.startswith("/restore"):
+            raw_turn = user_input[len("/restore"):].strip()
+            if not raw_turn:
+                print("usage: /restore <turn-number>")
+                continue
+            try:
+                print(agent.restore_turn(int(raw_turn)))
+            except (RuntimeError, ValueError) as exc:
                 print(str(exc), file=sys.stderr)
             continue
         if user_input == "/session":
