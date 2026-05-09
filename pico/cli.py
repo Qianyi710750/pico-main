@@ -40,6 +40,7 @@ HELP_DETAILS = textwrap.dedent(
     Commands:
     /help    Show this help message.
     /memory  Show the agent's distilled working memory.
+    /quick   Ask a short side question without adding it to the main session history.
     /session Show the path to the saved session file.
     /reset   Clear the current session history and memory.
     /exit    Exit the agent.
@@ -250,6 +251,10 @@ def build_arg_parser():
     parser.add_argument("--ollama-timeout", type=int, default=300, help="Ollama request timeout in seconds.")
     parser.add_argument("--openai-timeout", type=int, default=300, help="OpenAI-compatible request timeout in seconds.")
     parser.add_argument("--resume", default=None, help="Session id to resume or 'latest'.")
+    parser.add_argument("--quick", action="store_true", help="Use the prompt as a quick side question instead of a main task.")
+    parser.add_argument("--selection", default="", help="Selected text to include in a quick side question.")
+    parser.add_argument("--quick-context", default="", help="Small local context to include in a quick side question.")
+    parser.add_argument("--sidecar-id", default="", help="Persist a quick side chat under this independent sidecar id.")
     parser.add_argument("--approval", choices=("ask", "auto", "never"), default="ask", help="Approval policy for risky tools.")
     parser.add_argument(
         "--secret-env-name",
@@ -274,13 +279,22 @@ def main(argv=None):
     print(build_welcome(agent, model=model, host=host))
 
     if args.prompt:
-        # one-shot 模式：只跑一次 ask，不进入 REPL 循环。
         prompt = " ".join(args.prompt).strip()
         if prompt:
             print()
             try:
-                print(agent.ask(prompt))
-            except RuntimeError as exc:
+                if args.quick:
+                    print(
+                        agent.quick_ask(
+                            prompt,
+                            selection=args.selection,
+                            context=args.quick_context,
+                            sidecar_id=args.sidecar_id,
+                        )
+                    )
+                else:
+                    print(agent.ask(prompt))
+            except (RuntimeError, ValueError) as exc:
                 print(str(exc), file=sys.stderr)
                 return 1
         return 0
@@ -303,6 +317,17 @@ def main(argv=None):
             continue
         if user_input == "/memory":
             print(agent.memory_text())
+            continue
+        if user_input.startswith("/quick"):
+            question = user_input[len("/quick"):].strip()
+            if not question:
+                print("usage: /quick <question>")
+                continue
+            print()
+            try:
+                print(agent.quick_ask(question))
+            except RuntimeError as exc:
+                print(str(exc), file=sys.stderr)
             continue
         if user_input == "/session":
             print(agent.session_path)

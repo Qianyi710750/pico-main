@@ -144,6 +144,7 @@ class Pico:
         self.last_durable_promotions = []
         self.last_durable_rejections = []
         self.last_durable_superseded = []
+        self.last_quick_prompt_metadata = {}
         self._last_tool_result_metadata = {}
         self._last_prefix_refresh = {
             "workspace_changed": False,
@@ -175,6 +176,9 @@ class Pico:
         resume_state = self.session.setdefault("resume_state", {})
         if not isinstance(resume_state, dict):
             self.session["resume_state"] = {}
+        sidecars = self.session.setdefault("sidecars", {})
+        if not isinstance(sidecars, dict):
+            self.session["sidecars"] = {}
 
     def current_runtime_identity(self):
         return {
@@ -440,6 +444,94 @@ class Pico:
     def prompt(self, user_message):
         prompt, _ = self._build_prompt_and_metadata(user_message)
         return prompt
+
+    def quick_prompt(self, question, selection="", context="", history=None):
+        selection = str(selection or "").strip()
+        context = str(context or "").strip()
+        history = list(history or [])
+        parts = [
+            "You are pico's quick side chat.",
+            "Answer a small, self-contained question without using repository tools or the main conversation history.",
+            "Keep the answer concise. If project context is required and not provided, say what is missing.",
+            "Return a plain answer or wrap it in <final>...</final>.",
+            "",
+        ]
+        if history:
+            parts.append("Side chat memory, recent turns only:")
+            for item in history[-6:]:
+                role = str(item.get("role", "")).strip() or "unknown"
+                content = clip(str(item.get("content", "")), 500)
+                parts.append(f"[{role}] {content}")
+            parts.append("")
+        if selection:
+            parts.extend(["Selected text:", selection, ""])
+        if context:
+            parts.extend(["Local context:", clip(context, 1200), ""])
+        parts.extend(["Question:", str(question or "").strip()])
+        return "\n".join(parts).strip()
+
+    def quick_sidecar(self, sidecar_id):
+        sidecars = self.session.setdefault("sidecars", {})
+        sidecar_id = str(sidecar_id or "").strip()
+        if not sidecar_id:
+            sidecar_id = "default"
+        sidecar = sidecars.setdefault(
+            sidecar_id,
+            {
+                "id": sidecar_id,
+                "created_at": now(),
+                "history": [],
+            },
+        )
+        sidecar.setdefault("history", [])
+        return sidecar
+
+    def record_quick_turn(self, sidecar_id, question, answer, selection="", context=""):
+        sidecar = self.quick_sidecar(sidecar_id)
+        history = sidecar.setdefault("history", [])
+        history.append(
+            {
+                "role": "user",
+                "content": str(question or ""),
+                "selection": str(selection or ""),
+                "context": clip(str(context or ""), 1200),
+                "created_at": now(),
+            }
+        )
+        history.append({"role": "assistant", "content": str(answer or ""), "created_at": now()})
+        del history[:-8]
+        sidecar["updated_at"] = now()
+        self.session_path = self.session_store.save(self.session)
+        return sidecar
+
+    def quick_ask(self, question, selection="", context="", max_new_tokens=None, sidecar_id="", persist=False):
+        question = str(question or "").strip()
+        if not question:
+            raise ValueError("question must not be empty")
+        use_sidecar = bool(str(sidecar_id or "").strip()) or bool(persist)
+        sidecar_id = str(sidecar_id or "").strip() or "default"
+        history = self.quick_sidecar(sidecar_id).get("history", []) if use_sidecar else []
+        prompt = self.quick_prompt(question, selection=selection, context=context, history=history)
+        self.last_quick_prompt_metadata = {
+            "mode": "quick",
+            "question_chars": len(question),
+            "selection_chars": len(str(selection or "")),
+            "context_chars": len(str(context or "")),
+            "history_items": len(history),
+            "persisted": use_sidecar,
+            "sidecar_id": sidecar_id if use_sidecar else "",
+        }
+        raw = self.model_client.complete(prompt, max_new_tokens or min(self.max_new_tokens, 256))
+        kind, payload = self.parse(raw)
+        if kind == "final":
+            answer = str(payload).strip()
+        elif kind == "retry":
+            answer = str(raw).strip()
+        else:
+            answer = "Quick chat cannot run tools. Ask the main conversation if this needs repository access."
+        if use_sidecar:
+            self.record_quick_turn(sidecar_id, question, answer, selection=selection, context=context)
+        return answer
 
     def record(self, item):
         self.session["history"].append(item)

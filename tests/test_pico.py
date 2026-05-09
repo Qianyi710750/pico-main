@@ -207,6 +207,63 @@ def test_agent_saves_and_resumes_session(tmp_path):
     assert resumed.ask("Continue") == "Resumed."
 
 
+def test_quick_ask_does_not_modify_main_session_history(tmp_path):
+    agent = build_agent(
+        tmp_path,
+        [
+            "<final>Main answer.</final>",
+            "<final>JSON-RPC is a lightweight request/response protocol.</final>",
+        ],
+    )
+
+    assert agent.ask("Main task") == "Main answer."
+    history_before = list(agent.session["history"])
+    answer = agent.quick_ask("What is JSON-RPC?", selection="JSON-RPC")
+
+    assert answer == "JSON-RPC is a lightweight request/response protocol."
+    assert agent.session["history"] == history_before
+    quick_prompt = agent.model_client.prompts[-1]
+    assert "quick side chat" in quick_prompt
+    assert "Selected text:\nJSON-RPC" in quick_prompt
+    assert "Main task" not in quick_prompt
+    assert "Main answer." not in quick_prompt
+
+
+def test_quick_ask_refuses_tool_calls(tmp_path):
+    agent = build_agent(
+        tmp_path,
+        [
+            '<tool>{"name":"read_file","args":{"path":"README.md","start":1,"end":1}}</tool>',
+        ],
+    )
+
+    answer = agent.quick_ask("Read README?")
+
+    assert answer == "Quick chat cannot run tools. Ask the main conversation if this needs repository access."
+    assert agent.session["history"] == []
+
+
+def test_quick_ask_can_keep_independent_sidecar_history(tmp_path):
+    agent = build_agent(
+        tmp_path,
+        [
+            "<final>JSON-RPC is a request/response protocol.</final>",
+            "<final>It means a JSON-RPC server process connected over standard input and output.</final>",
+        ],
+    )
+
+    first = agent.quick_ask("What is JSON-RPC?", selection="JSON-RPC", sidecar_id="terms")
+    second = agent.quick_ask("What does stdio mean there?", sidecar_id="terms")
+
+    assert first == "JSON-RPC is a request/response protocol."
+    assert second == "It means a JSON-RPC server process connected over standard input and output."
+    assert agent.session["history"] == []
+    assert "terms" in agent.session["sidecars"]
+    assert len(agent.session["sidecars"]["terms"]["history"]) == 4
+    assert "Side chat memory" in agent.model_client.prompts[-1]
+    assert "What is JSON-RPC?" in agent.model_client.prompts[-1]
+
+
 def test_delegate_uses_child_agent(tmp_path):
     agent = build_agent(
         tmp_path,
