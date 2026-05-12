@@ -18,6 +18,7 @@ from pathlib import Path
 from . import memory as memorylib
 from .context_manager import ContextManager
 from .run_store import RunStore
+from .skills import SkillCatalog, default_skills_dir
 from .task_state import TaskState
 from . import tools as toolkit
 from .workspace import IGNORED_PATH_NAMES, MAX_HISTORY, WorkspaceContext, clip, now
@@ -60,6 +61,7 @@ class PromptPrefix:
     hash: str
     workspace_fingerprint: str
     tool_signature: str
+    skill_signature: str
     built_at: str
 
 
@@ -101,6 +103,8 @@ class Pico:
         shell_env_allowlist=None,
         secret_env_names=None,
         feature_flags=None,
+        skills_dir=None,
+        skill_names=None,
     ):
         self.model_client = model_client
         self.workspace = workspace
@@ -114,6 +118,10 @@ class Pico:
         self.read_only = read_only
         self.shell_env_allowlist = tuple(shell_env_allowlist or DEFAULT_SHELL_ENV_ALLOWLIST)
         self.secret_env_names = {str(name).upper() for name in (secret_env_names or ())}
+        self.skills_dir = Path(skills_dir).resolve() if skills_dir else default_skills_dir(self.root)
+        self.manual_skill_names = tuple(str(name).strip() for name in (skill_names or ()) if str(name).strip())
+        self.skill_catalog = SkillCatalog.load(self.skills_dir)
+        self.active_skill_names = self.skill_catalog.select("", self.manual_skill_names)
         self.feature_flags = dict(DEFAULT_FEATURE_FLAGS)
         if feature_flags:
             self.feature_flags.update({str(key): bool(value) for key, value in feature_flags.items()})
@@ -126,6 +134,12 @@ class Pico:
             "memory": memorylib.default_memory_state(),
         }
         self._ensure_session_shape()
+        if skill_names is None:
+            saved_skill_names = self.session.get("skills", {}).get("manual", [])
+            self.manual_skill_names = tuple(str(name).strip() for name in saved_skill_names if str(name).strip())
+            self.active_skill_names = self.skill_catalog.select("", self.manual_skill_names)
+        self.session["skills"]["manual"] = list(self.manual_skill_names)
+        self.session["skills"]["active"] = list(self.active_skill_names)
         self.memory = memorylib.LayeredMemory(
             self.session.setdefault("memory", memorylib.default_memory_state()),
             workspace_root=self.root,
@@ -148,6 +162,7 @@ class Pico:
         self._last_tool_result_metadata = {}
         self._last_prefix_refresh = {
             "workspace_changed": False,
+            "skills_changed": False,
             "prefix_changed": False,
         }
 
@@ -179,6 +194,9 @@ class Pico:
         sidecars = self.session.setdefault("sidecars", {})
         if not isinstance(sidecars, dict):
             self.session["sidecars"] = {}
+        skills = self.session.setdefault("skills", {})
+        if not isinstance(skills, dict):
+            self.session["skills"] = {}
 
     def current_runtime_identity(self):
         return {
@@ -194,6 +212,8 @@ class Pico:
             "shell_env_allowlist": list(self.shell_env_allowlist),
             "workspace_fingerprint": getattr(getattr(self, "prefix_state", None), "workspace_fingerprint", self.workspace.fingerprint()),
             "tool_signature": self.tool_signature(),
+            "skill_names": list(self.active_skill_names),
+            "skill_signature": self.skill_signature(),
         }
 
     def checkpoint_state(self):
@@ -245,6 +265,8 @@ class Pico:
                     "shell_env_allowlist",
                     "workspace_fingerprint",
                     "tool_signature",
+                    "skill_names",
+                    "skill_signature",
                 )
                 for key in identity_keys:
                     if key not in saved_identity:
@@ -324,6 +346,49 @@ class Pico:
             )
         return hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
 
+    def skill_signature(self):
+        return self.skill_catalog.signature(self.active_skill_names)
+
+    def refresh_skills(self, user_message=""):
+        previous_names = tuple(getattr(self, "active_skill_names", ()))
+        previous_signature = self.skill_signature() if hasattr(self, "skill_catalog") else ""
+        self.skill_catalog = SkillCatalog.load(self.skills_dir)
+        self.active_skill_names = self.skill_catalog.select(user_message, self.manual_skill_names)
+        self.session["skills"]["manual"] = list(self.manual_skill_names)
+        self.session["skills"]["active"] = list(self.active_skill_names)
+        return {
+            "skill_names_changed": previous_names != self.active_skill_names,
+            "skill_signature_changed": previous_signature != self.skill_signature(),
+        }
+
+    def active_skills_text(self):
+        return self.skill_catalog.render(self.active_skill_names)
+
+    def skills_summary(self):
+        active = ", ".join(self.active_skill_names) or "-"
+        return f"Active skills: {active}\nAvailable skills:\n{self.skill_catalog.summary_text()}"
+
+    def skill_detail(self, name):
+        skill = self.skill_catalog.get(name)
+        if not skill:
+            return f"unknown skill: {name}"
+        return skill.to_prompt_text()
+
+    def use_skills(self, names):
+        names = tuple(str(name).strip() for name in (names or ()) if str(name).strip())
+        if names == ("off",) or names == ("none",):
+            names = ()
+        unknown = self.skill_catalog.unknown_names(names)
+        if unknown:
+            return "unknown skill(s): " + ", ".join(unknown)
+        self.manual_skill_names = names
+        self.refresh_skills("")
+        self.session["skills"]["manual"] = list(self.manual_skill_names)
+        self.refresh_prefix(force=True)
+        self.session_path = self.session_store.save(self.session)
+        active = ", ".join(self.active_skill_names) or "-"
+        return f"active skills: {active}"
+
     def build_prefix(self):
         tool_lines = []
         for name, tool in self.tools.items():
@@ -341,6 +406,9 @@ class Pico:
                 "<final>Done.</final>",
             ]
         )
+        skills_text = self.active_skills_text()
+        if skills_text:
+            skills_text += "\n\n"
         # prefix 可以理解成 agent 的“工作手册”：
         # 它是谁、工具怎么调用、当前仓库是什么状态，都写在这里。
         text = textwrap.dedent(
@@ -371,6 +439,7 @@ class Pico:
             Valid response examples:
             {examples}
 
+            {skills_text}
             {self.workspace.text()}
             """
         ).strip()
@@ -379,6 +448,7 @@ class Pico:
             hash=hashlib.sha256(text.encode("utf-8")).hexdigest(),
             workspace_fingerprint=self.workspace.fingerprint(),
             tool_signature=self.tool_signature(),
+            skill_signature=self.skill_signature(),
             built_at=now(),
         )
 
@@ -389,6 +459,8 @@ class Pico:
     def refresh_prefix(self, force=False):
         previous_hash = getattr(getattr(self, "prefix_state", None), "hash", None)
         previous_workspace_fingerprint = getattr(getattr(self, "prefix_state", None), "workspace_fingerprint", None)
+        previous_skill_signature = getattr(getattr(self, "prefix_state", None), "skill_signature", None)
+        current_skill_signature = self.skill_signature()
 
         # 工作区事实相对稳定，所以这里按整体刷新；
         # 只有这些事实真的变化了，才重建完整 prefix。
@@ -398,13 +470,15 @@ class Pico:
         if workspace_changed:
             self.workspace = refreshed_workspace
 
-        prefix_state = self.build_prefix() if workspace_changed or force or previous_hash is None else self.prefix_state
+        skills_changed = previous_skill_signature != current_skill_signature
+        prefix_state = self.build_prefix() if workspace_changed or skills_changed or force or previous_hash is None else self.prefix_state
         prefix_changed = force or previous_hash != prefix_state.hash
         if prefix_changed:
             self._apply_prefix_state(prefix_state)
 
         self._last_prefix_refresh = {
             "workspace_changed": workspace_changed,
+            "skills_changed": skills_changed,
             "prefix_changed": prefix_changed,
         }
         return dict(self._last_prefix_refresh)
@@ -691,6 +765,7 @@ class Pico:
         return metadata
 
     def _build_prompt_and_metadata(self, user_message):
+        skill_refresh = self.refresh_skills(user_message)
         refresh = self.refresh_prefix()
         self.resume_state = self.evaluate_resume_state()
         prompt, metadata = self.context_manager.build(user_message)
@@ -706,6 +781,14 @@ class Pico:
                 "tool_count": len(self.tools),
                 "workspace_docs": len(self.workspace.project_docs),
                 "recent_commits": len(self.workspace.recent_commits),
+                "active_skills": list(self.active_skill_names),
+                "skill_count": len(self.active_skill_names),
+                "skill_signature": self.prefix_state.skill_signature,
+                "skills_changed": (
+                    refresh.get("skills_changed", False)
+                    or skill_refresh["skill_names_changed"]
+                    or skill_refresh["skill_signature_changed"]
+                ),
                 "prefix_hash": self.prefix_state.hash,
                 "prompt_cache_key": self.prefix_state.hash,
                 "workspace_fingerprint": self.prefix_state.workspace_fingerprint,

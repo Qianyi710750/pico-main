@@ -45,6 +45,8 @@ HELP_DETAILS = textwrap.dedent(
     /pruned  Show turns removed from future context.
     /quick   Ask a short side question without adding it to the main session history.
     /restore N Restore a pruned main conversation turn.
+    /skills  Show available and active local skills.
+    /skill   Use skills: /skill name, /skill off, or /skill show name.
     /session Show the path to the saved session file.
     /reset   Clear the current session history and memory.
     /exit    Exit the agent.
@@ -225,6 +227,8 @@ def build_agent(args):
             max_steps=args.max_steps,
             max_new_tokens=args.max_new_tokens,
             secret_env_names=configured_secret_names,
+            skills_dir=args.skills_dir,
+            skill_names=args.skill or None,
         )
     return Pico(
         model_client=model,
@@ -234,6 +238,8 @@ def build_agent(args):
         max_steps=args.max_steps,
         max_new_tokens=args.max_new_tokens,
         secret_env_names=configured_secret_names,
+        skills_dir=args.skills_dir,
+        skill_names=args.skill or None,
     )
 
 
@@ -259,6 +265,17 @@ def build_arg_parser():
     parser.add_argument("--selection", default="", help="Selected text to include in a quick side question.")
     parser.add_argument("--quick-context", default="", help="Small local context to include in a quick side question.")
     parser.add_argument("--sidecar-id", default="", help="Persist a quick side chat under this independent sidecar id.")
+    parser.add_argument(
+        "--skill",
+        action="append",
+        default=[],
+        help="Activate a local skill by name. Can be passed more than once.",
+    )
+    parser.add_argument(
+        "--skills-dir",
+        default=None,
+        help="Directory containing */SKILL.md files. Defaults to .pico/skills.",
+    )
     parser.add_argument("--approval", choices=("ask", "auto", "never"), default="ask", help="Approval policy for risky tools.")
     parser.add_argument(
         "--secret-env-name",
@@ -324,6 +341,19 @@ def main(argv=None):
             continue
         if user_input == "/memory":
             print(agent.memory_text())
+            continue
+        if user_input == "/skills":
+            print(agent.skills_summary())
+            continue
+        if user_input.startswith("/skill"):
+            raw_skill = user_input[len("/skill"):].strip()
+            if not raw_skill:
+                print("usage: /skill <name...> | /skill off | /skill show <name>")
+                continue
+            if raw_skill.startswith("show "):
+                print(agent.skill_detail(raw_skill[len("show "):].strip()))
+                continue
+            print(agent.use_skills(raw_skill.split()))
             continue
         if user_input.startswith("/prune"):
             raw_turn = user_input[len("/prune"):].strip()
